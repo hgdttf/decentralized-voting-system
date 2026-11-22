@@ -23,9 +23,11 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "hardhat node & yarn deploy --network localhost",
+    "dev": "hardhat node",
     "compile": "hardhat compile",
     "deploy": "hardhat compile && hardhat deploy",
+    "deploy:voting": "hardhat compile && hardhat deploy:voting",
+    "deploy:local": "hardhat compile && hardhat deploy:voting --network localhost",
     "verify": "hardhat verify",
     "test": "hardhat test",
     "test:report-gas": "REPORT_GAS=true hardhat test",
@@ -71,7 +73,8 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "@semaphore-protocol/contracts": "4.14.5"
+    "@semaphore-protocol/contracts": "4.14.5",
+    "libsodium-wrappers-sumo": "0.8.4"
   },
   "packageManager": "yarn@4.1.0"
 }

@@ -69,3 +69,8 @@ node_modules/
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Local voter identity backups and election secrets
+*.identity-backup.json
+*.identity.json
+*.election-key.json
