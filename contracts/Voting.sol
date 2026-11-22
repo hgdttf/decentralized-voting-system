@@ -11,6 +11,7 @@ contract Voting {
 
     uint256 public constant MIN_REGISTERED_VOTERS = 3;
     uint256 public constant MERKLE_TREE_DURATION = 1 days;
+    uint256 public constant ELECTION_PUBLIC_KEY_LENGTH = 32;
 
     enum ElectionStatus {
         Registration,
@@ -56,6 +57,10 @@ contract Voting {
     mapping(uint256 => mapping(uint256 => uint256))
         private candidateVoteCounts;
 
+    // Public encryption key for each election.
+    // The corresponding private key must remain off-chain.
+    mapping(uint256 => bytes) private electionPublicKeys;
+
     // --------------------------------------------------
     // Errors
     // --------------------------------------------------
@@ -77,6 +82,9 @@ contract Voting {
     error InvalidBallotCommitment();
     error InvalidTallyLength();
     error InvalidTallyTotal();
+    error InvalidElectionPublicKey();
+    error ElectionPublicKeyAlreadySet();
+    error MissingElectionPublicKey();
 
     // --------------------------------------------------
     // Events
@@ -98,6 +106,11 @@ contract Voting {
     event VoterRegistered(
         uint256 indexed electionId,
         uint256 registeredVoterCount
+    );
+
+    event ElectionPublicKeyPublished(
+        uint256 indexed electionId,
+        bytes publicKey
     );
 
     event VotingStarted(uint256 indexed electionId);
@@ -235,6 +248,51 @@ contract Voting {
     }
 
     // --------------------------------------------------
+    // Election encryption-key management
+    // --------------------------------------------------
+
+    function setElectionPublicKey(
+        uint256 electionId,
+        bytes calldata publicKey
+    )
+        external
+        electionExists(electionId)
+        onlyElectionAdmin(electionId)
+    {
+        Election storage election = elections[electionId];
+
+        if (election.status != ElectionStatus.Registration) {
+            revert InvalidElectionStatus();
+        }
+
+        if (publicKey.length != ELECTION_PUBLIC_KEY_LENGTH) {
+            revert InvalidElectionPublicKey();
+        }
+
+        if (electionPublicKeys[electionId].length != 0) {
+            revert ElectionPublicKeyAlreadySet();
+        }
+
+        electionPublicKeys[electionId] = publicKey;
+
+        emit ElectionPublicKeyPublished(
+            electionId,
+            publicKey
+        );
+    }
+
+    function getElectionPublicKey(
+        uint256 electionId
+    )
+        external
+        view
+        electionExists(electionId)
+        returns (bytes memory)
+    {
+        return electionPublicKeys[electionId];
+    }
+
+    // --------------------------------------------------
     // Voter registration
     // --------------------------------------------------
 
@@ -307,6 +365,13 @@ contract Voting {
             MIN_REGISTERED_VOTERS
         ) {
             revert InsufficientVoters();
+        }
+
+        if (
+            electionPublicKeys[electionId].length !=
+            ELECTION_PUBLIC_KEY_LENGTH
+        ) {
+            revert MissingElectionPublicKey();
         }
 
         election.status = ElectionStatus.Voting;

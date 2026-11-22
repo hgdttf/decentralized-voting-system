@@ -1,109 +1,62 @@
-
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { Group, Identity, generateProof } from "@semaphore-protocol/core";
 import { expect } from "chai";
 import { hexlify, keccak256, toUtf8Bytes } from "ethers";
 import { ethers, run } from "hardhat";
 import { Voting } from "../typechain-types";
+import { generateElectionKeyPair } from "../scripts/ballot-crypto";
 
 describe("Voting", () => {
     async function deployVotingFixture() {
         const [admin, other] = await ethers.getSigners();
-
-        const { semaphore } = await run("deploy:semaphore", {
-            logs: false
-        });
-
+        const { semaphore } = await run("deploy:semaphore", { logs: false });
         const VotingFactory = await ethers.getContractFactory("Voting");
-
-        const voting = (await VotingFactory.deploy(
-            await semaphore.getAddress()
-        )) as unknown as Voting;
-
+        const voting = (await VotingFactory.deploy(await semaphore.getAddress())) as unknown as Voting;
         await voting.waitForDeployment();
-
         return { admin, other, semaphore, voting };
     }
 
     async function createElectionFixture() {
         const fixture = await deployVotingFixture();
-
         const latestBlock = await ethers.provider.getBlock("latest");
-
-        if (!latestBlock) {
-            throw new Error("Could not retrieve latest block");
-        }
-
+        if (!latestBlock) throw new Error("Could not retrieve latest block");
         const startTime = BigInt(latestBlock.timestamp + 3600);
         const endTime = startTime + 3600n;
         const electionId = 1n;
-
-        await fixture.voting.createElection(
-            "University Election",
-            startTime,
-            endTime
-        );
-
-        return {
-            ...fixture,
-            electionId,
-            startTime,
-            endTime
-        };
+        await fixture.voting.createElection("University Election", startTime, endTime);
+        return { ...fixture, electionId, startTime, endTime };
     }
 
     async function createPreparedElection() {
         const fixture = await createElectionFixture();
+        await fixture.voting.addCandidate(fixture.electionId, "Candidate A");
+        await fixture.voting.addCandidate(fixture.electionId, "Candidate B");
 
-        await fixture.voting.addCandidate(
-            fixture.electionId,
-            "Candidate A"
-        );
-
-        await fixture.voting.addCandidate(
-            fixture.electionId,
-            "Candidate B"
-        );
-
-        const identities = [
-            new Identity(),
-            new Identity(),
-            new Identity(),
-            new Identity(),
-            new Identity()
-        ];
-
+        const identities = Array.from({ length: 5 }, () => new Identity());
         const group = new Group();
 
         for (const identity of identities) {
-            await fixture.voting.registerVoter(
-                fixture.electionId,
-                identity.commitment
-            );
-
+            await fixture.voting.registerVoter(fixture.electionId, identity.commitment);
             group.addMember(identity.commitment);
         }
 
-        const election = await fixture.voting.getElection(
-            fixture.electionId
-        );
-
-        return {
-            ...fixture,
-            identities,
-            group,
-            election
-        };
+        const election = await fixture.voting.getElection(fixture.electionId);
+        return { ...fixture, identities, group, election };
     }
 
     async function startPreparedElection() {
         const fixture = await createPreparedElection();
+        const electionKeys = await generateElectionKeyPair();
+
+        await fixture.voting.setElectionPublicKey(
+            fixture.electionId,
+            `0x${electionKeys.publicKey}`
+        );
 
         await time.increaseTo(Number(fixture.startTime));
-
         await fixture.voting.startVoting(fixture.electionId);
 
-        return fixture;
+        return { ...fixture, electionKeys };
     }
 
     async function createBallotProof(
@@ -113,13 +66,7 @@ describe("Voting", () => {
         scope: bigint
     ) {
         const message = BigInt(keccak256(encryptedBallot));
-
-        return generateProof(
-            identity,
-            group,
-            message,
-            scope
-        );
+        return generateProof(identity, group, message, scope);
     }
 
     async function submitTestBallot(
@@ -130,16 +77,9 @@ describe("Voting", () => {
         scope: bigint,
         ballotText: string
     ) {
-        const encryptedBallot = hexlify(
-            toUtf8Bytes(ballotText)
-        );
-
-        const proof = await createBallotProof(
-            identity,
-            group,
-            encryptedBallot,
-            scope
-        );
+        // Test-only payload. This is not production ballot encryption.
+        const encryptedBallot = hexlify(toUtf8Bytes(ballotText));
+        const proof = await createBallotProof(identity, group, encryptedBallot, scope);
 
         const proofStruct = {
             merkleTreeDepth: proof.merkleTreeDepth,
@@ -150,45 +90,29 @@ describe("Voting", () => {
             points: proof.points
         };
 
-        await voting.submitBallot(
-            electionId,
-            encryptedBallot,
-            proofStruct
-        );
+        await voting.submitBallot(electionId, encryptedBallot, proofStruct);
 
         return { encryptedBallot, proof };
     }
 
     describe("Election creation", () => {
         it("creates an election with its own Semaphore group and scope", async () => {
-            const { voting, admin } = await loadFixture(
-                deployVotingFixture
-            );
-
+            const { voting, admin } = await loadFixture(deployVotingFixture);
             const latestBlock = await ethers.provider.getBlock("latest");
 
-            if (!latestBlock) {
-                throw new Error("Could not retrieve latest block");
-            }
+            if (!latestBlock) throw new Error("Could not retrieve latest block");
 
             const startTime = BigInt(latestBlock.timestamp + 3600);
             const endTime = startTime + 3600n;
 
             await expect(
-                voting.createElection(
-                    "University Election",
-                    startTime,
-                    endTime
-                )
+                voting.createElection("University Election", startTime, endTime)
             ).to.emit(voting, "ElectionCreated");
 
             const election = await voting.getElection(1n);
 
             expect(election.admin).to.equal(admin.address);
-
-            // Semaphore group ID 0 is valid.
             expect(election.groupId).to.be.a("bigint");
-
             expect(election.scope).to.be.greaterThan(0n);
             expect(election.status).to.equal(0n);
             expect(election.registeredVoterCount).to.equal(0n);
@@ -196,30 +120,16 @@ describe("Voting", () => {
         });
 
         it("creates separate groups and scopes for separate elections", async () => {
-            const { voting } = await loadFixture(
-                deployVotingFixture
-            );
-
+            const { voting } = await loadFixture(deployVotingFixture);
             const latestBlock = await ethers.provider.getBlock("latest");
 
-            if (!latestBlock) {
-                throw new Error("Could not retrieve latest block");
-            }
+            if (!latestBlock) throw new Error("Could not retrieve latest block");
 
             const startTime = BigInt(latestBlock.timestamp + 3600);
             const endTime = startTime + 3600n;
 
-            await voting.createElection(
-                "Election One",
-                startTime,
-                endTime
-            );
-
-            await voting.createElection(
-                "Election Two",
-                startTime,
-                endTime
-            );
+            await voting.createElection("Election One", startTime, endTime);
+            await voting.createElection("Election Two", startTime, endTime);
 
             const first = await voting.getElection(1n);
             const second = await voting.getElection(2n);
@@ -229,87 +139,48 @@ describe("Voting", () => {
         });
 
         it("rejects an empty election title", async () => {
-            const { voting } = await loadFixture(
-                deployVotingFixture
-            );
-
+            const { voting } = await loadFixture(deployVotingFixture);
             const latestBlock = await ethers.provider.getBlock("latest");
 
-            if (!latestBlock) {
-                throw new Error("Could not retrieve latest block");
-            }
+            if (!latestBlock) throw new Error("Could not retrieve latest block");
 
             const startTime = BigInt(latestBlock.timestamp + 3600);
 
             await expect(
-                voting.createElection(
-                    "",
-                    startTime,
-                    startTime + 3600n
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidElectionTime"
-            );
+                voting.createElection("", startTime, startTime + 3600n)
+            ).to.be.revertedWithCustomError(voting, "InvalidElectionTime");
         });
 
         it("rejects an election whose start time is in the past", async () => {
-            const { voting } = await loadFixture(
-                deployVotingFixture
-            );
-
+            const { voting } = await loadFixture(deployVotingFixture);
             const latestBlock = await ethers.provider.getBlock("latest");
 
-            if (!latestBlock) {
-                throw new Error("Could not retrieve latest block");
-            }
+            if (!latestBlock) throw new Error("Could not retrieve latest block");
 
             const startTime = BigInt(latestBlock.timestamp);
-            const endTime = startTime + 3600n;
 
             await expect(
-                voting.createElection(
-                    "Invalid Election",
-                    startTime,
-                    endTime
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidElectionTime"
-            );
+                voting.createElection("Invalid Election", startTime, startTime + 3600n)
+            ).to.be.revertedWithCustomError(voting, "InvalidElectionTime");
         });
 
         it("rejects an end time that is not after the start time", async () => {
-            const { voting } = await loadFixture(
-                deployVotingFixture
-            );
-
+            const { voting } = await loadFixture(deployVotingFixture);
             const latestBlock = await ethers.provider.getBlock("latest");
 
-            if (!latestBlock) {
-                throw new Error("Could not retrieve latest block");
-            }
+            if (!latestBlock) throw new Error("Could not retrieve latest block");
 
             const startTime = BigInt(latestBlock.timestamp + 3600);
 
             await expect(
-                voting.createElection(
-                    "Invalid Duration",
-                    startTime,
-                    startTime
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidElectionTime"
-            );
+                voting.createElection("Invalid Duration", startTime, startTime)
+            ).to.be.revertedWithCustomError(voting, "InvalidElectionTime");
         });
     });
 
     describe("Candidate management", () => {
         it("allows the administrator to add candidates", async () => {
-            const { voting, electionId } = await loadFixture(
-                createElectionFixture
-            );
+            const { voting, electionId } = await loadFixture(createElectionFixture);
 
             await expect(
                 voting.addCandidate(electionId, "Candidate A")
@@ -322,9 +193,7 @@ describe("Voting", () => {
         });
 
         it("allows multiple candidates to be added", async () => {
-            const { voting, electionId } = await loadFixture(
-                createElectionFixture
-            );
+            const { voting, electionId } = await loadFixture(createElectionFixture);
 
             await voting.addCandidate(electionId, "Candidate A");
             await voting.addCandidate(electionId, "Candidate B");
@@ -337,55 +206,33 @@ describe("Voting", () => {
         });
 
         it("rejects candidate creation by an unauthorized account", async () => {
-            const { voting, electionId, other } = await loadFixture(
-                createElectionFixture
-            );
+            const { voting, electionId, other } = await loadFixture(createElectionFixture);
 
             await expect(
-                voting.connect(other).addCandidate(
-                    electionId,
-                    "Candidate X"
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "Unauthorized"
-            );
+                voting.connect(other).addCandidate(electionId, "Candidate X")
+            ).to.be.revertedWithCustomError(voting, "Unauthorized");
         });
 
         it("rejects an empty candidate name", async () => {
-            const { voting, electionId } = await loadFixture(
-                createElectionFixture
-            );
+            const { voting, electionId } = await loadFixture(createElectionFixture);
 
             await expect(
                 voting.addCandidate(electionId, "")
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidCandidate"
-            );
+            ).to.be.revertedWithCustomError(voting, "InvalidCandidate");
         });
     });
 
     describe("Voter registration", () => {
         it("registers a voter commitment", async () => {
-            const { voting, electionId } = await loadFixture(
-                createElectionFixture
-            );
-
+            const { voting, electionId } = await loadFixture(createElectionFixture);
             const identity = new Identity();
 
             await expect(
-                voting.registerVoter(
-                    electionId,
-                    identity.commitment
-                )
+                voting.registerVoter(electionId, identity.commitment)
             ).to.emit(voting, "VoterRegistered");
 
             expect(
-                await voting.registeredCommitments(
-                    electionId,
-                    identity.commitment
-                )
+                await voting.registeredCommitments(electionId, identity.commitment)
             ).to.equal(true);
 
             const election = await voting.getElection(electionId);
@@ -394,99 +241,148 @@ describe("Voting", () => {
         });
 
         it("rejects duplicate identity commitments", async () => {
-            const { voting, electionId } = await loadFixture(
-                createElectionFixture
-            );
-
+            const { voting, electionId } = await loadFixture(createElectionFixture);
             const identity = new Identity();
 
-            await voting.registerVoter(
-                electionId,
-                identity.commitment
-            );
+            await voting.registerVoter(electionId, identity.commitment);
 
             await expect(
-                voting.registerVoter(
-                    electionId,
-                    identity.commitment
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "DuplicateCommitment"
-            );
+                voting.registerVoter(electionId, identity.commitment)
+            ).to.be.revertedWithCustomError(voting, "DuplicateCommitment");
         });
 
         it("rejects a zero identity commitment", async () => {
-            const { voting, electionId } = await loadFixture(
-                createElectionFixture
-            );
+            const { voting, electionId } = await loadFixture(createElectionFixture);
 
             await expect(
                 voting.registerVoter(electionId, 0n)
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidCommitment"
-            );
+            ).to.be.revertedWithCustomError(voting, "InvalidCommitment");
         });
 
         it("rejects voter registration by an unauthorized account", async () => {
-            const { voting, electionId, other } = await loadFixture(
-                createElectionFixture
-            );
-
+            const { voting, electionId, other } = await loadFixture(createElectionFixture);
             const identity = new Identity();
 
             await expect(
-                voting.connect(other).registerVoter(
+                voting.connect(other).registerVoter(electionId, identity.commitment)
+            ).to.be.revertedWithCustomError(voting, "Unauthorized");
+        });
+    });
+
+    describe("Election public-key publication", () => {
+        it("allows the election administrator to publish a 32-byte public key", async () => {
+            const { voting, electionId } = await loadFixture(createElectionFixture);
+            const keys = await generateElectionKeyPair();
+            const publicKey = `0x${keys.publicKey}`;
+
+            await expect(
+                voting.setElectionPublicKey(electionId, publicKey)
+            )
+                .to.emit(voting, "ElectionPublicKeyPublished")
+                .withArgs(electionId, publicKey);
+
+            expect(
+                await voting.getElectionPublicKey(electionId)
+            ).to.equal(publicKey);
+        });
+
+        it("rejects publication by an unauthorized account", async () => {
+            const { voting, electionId, other } = await loadFixture(createElectionFixture);
+            const keys = await generateElectionKeyPair();
+
+            await expect(
+                voting.connect(other).setElectionPublicKey(
                     electionId,
-                    identity.commitment
+                    `0x${keys.publicKey}`
                 )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "Unauthorized"
+            ).to.be.revertedWithCustomError(voting, "Unauthorized");
+        });
+
+        it("rejects a public key that is not exactly 32 bytes", async () => {
+            const { voting, electionId } = await loadFixture(createElectionFixture);
+
+            await expect(
+                voting.setElectionPublicKey(electionId, "0x1234")
+            ).to.be.revertedWithCustomError(voting, "InvalidElectionPublicKey");
+        });
+
+        it("rejects publishing the public key more than once", async () => {
+            const { voting, electionId } = await loadFixture(createElectionFixture);
+            const first = await generateElectionKeyPair();
+            const second = await generateElectionKeyPair();
+
+            await voting.setElectionPublicKey(
+                electionId,
+                `0x${first.publicKey}`
             );
+
+            await expect(
+                voting.setElectionPublicKey(
+                    electionId,
+                    `0x${second.publicKey}`
+                )
+            ).to.be.revertedWithCustomError(voting, "ElectionPublicKeyAlreadySet");
+        });
+
+        it("rejects publishing the public key after voting has started", async () => {
+            const fixture = await loadFixture(createPreparedElection);
+            const keys = await generateElectionKeyPair();
+
+            await fixture.voting.setElectionPublicKey(
+                fixture.electionId,
+                `0x${keys.publicKey}`
+            );
+
+            await time.increaseTo(Number(fixture.startTime));
+            await fixture.voting.startVoting(fixture.electionId);
+
+            const anotherKeys = await generateElectionKeyPair();
+
+            await expect(
+                fixture.voting.setElectionPublicKey(
+                    fixture.electionId,
+                    `0x${anotherKeys.publicKey}`
+                )
+            ).to.be.reverted;
+        });
+
+        it("does not allow voting to start without a published public key", async () => {
+            const { voting, electionId, startTime } =
+                await loadFixture(createPreparedElection);
+
+            await time.increaseTo(Number(startTime));
+
+            await expect(
+                voting.startVoting(electionId)
+            ).to.be.revertedWithCustomError(voting, "MissingElectionPublicKey");
         });
     });
 
     describe("Voting lifecycle", () => {
         it("rejects starting an election before its start time", async () => {
-            const { voting, electionId } = await loadFixture(
-                createPreparedElection
-            );
+            const { voting, electionId } = await loadFixture(createPreparedElection);
 
             await expect(
                 voting.startVoting(electionId)
-            ).to.be.revertedWithCustomError(
-                voting,
-                "ElectionNotStarted"
-            );
+            ).to.be.revertedWithCustomError(voting, "ElectionNotStarted");
         });
 
         it("rejects starting an election with insufficient candidates", async () => {
             const { voting, electionId, startTime } =
                 await loadFixture(createElectionFixture);
 
-            // Only one candidate.
             await voting.addCandidate(electionId, "Candidate A");
 
-            // Register the required three voters.
             for (let i = 0; i < 3; i += 1) {
                 const identity = new Identity();
-
-                await voting.registerVoter(
-                    electionId,
-                    identity.commitment
-                );
+                await voting.registerVoter(electionId, identity.commitment);
             }
 
             await time.increaseTo(Number(startTime));
 
             await expect(
                 voting.startVoting(electionId)
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InsufficientCandidates"
-            );
+            ).to.be.revertedWithCustomError(voting, "InsufficientCandidates");
         });
 
         it("rejects starting an election with insufficient registered voters", async () => {
@@ -496,36 +392,20 @@ describe("Voting", () => {
             await voting.addCandidate(electionId, "Candidate A");
             await voting.addCandidate(electionId, "Candidate B");
 
-            // Only two voters, while the contract requires three.
             for (let i = 0; i < 2; i += 1) {
                 const identity = new Identity();
-
-                await voting.registerVoter(
-                    electionId,
-                    identity.commitment
-                );
+                await voting.registerVoter(electionId, identity.commitment);
             }
 
             await time.increaseTo(Number(startTime));
 
             await expect(
                 voting.startVoting(electionId)
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InsufficientVoters"
-            );
+            ).to.be.revertedWithCustomError(voting, "InsufficientVoters");
         });
 
-        it("starts an election after its start time", async () => {
-            const { voting, electionId, startTime } =
-                await loadFixture(createPreparedElection);
-
-            await time.increaseTo(Number(startTime));
-
-            await expect(
-                voting.startVoting(electionId)
-            ).to.emit(voting, "VotingStarted");
-
+        it("starts an election after its start time when the public key is published", async () => {
+            const { voting, electionId } = await loadFixture(startPreparedElection);
             const election = await voting.getElection(electionId);
 
             expect(election.status).to.equal(1n);
@@ -533,18 +413,9 @@ describe("Voting", () => {
     });
 
     describe("Anonymous ballot submission", () => {
-        it("accepts a valid Semaphore proof and stores the encrypted ballot", async () => {
-            const fixture = await loadFixture(
-                startPreparedElection
-            );
-
-            const {
-                voting,
-                electionId,
-                election,
-                identities,
-                group
-            } = fixture;
+        it("accepts a valid Semaphore proof and stores the ballot payload", async () => {
+            const fixture = await loadFixture(startPreparedElection);
+            const { voting, electionId, election, identities, group } = fixture;
 
             const { encryptedBallot } = await submitTestBallot(
                 voting,
@@ -555,32 +426,18 @@ describe("Voting", () => {
                 "test-ballot-one"
             );
 
-            const updatedElection = await voting.getElection(
-                electionId
-            );
-
+            const updatedElection = await voting.getElection(electionId);
             expect(updatedElection.acceptedBallotCount).to.equal(1n);
 
-            const storedBallots = await voting.getEncryptedBallots(
-                electionId
-            );
+            const storedBallots = await voting.getEncryptedBallots(electionId);
 
             expect(storedBallots.length).to.equal(1);
             expect(storedBallots[0]).to.equal(encryptedBallot);
         });
 
         it("rejects reuse of the same Semaphore nullifier", async () => {
-            const fixture = await loadFixture(
-                startPreparedElection
-            );
-
-            const {
-                voting,
-                electionId,
-                election,
-                identities,
-                group
-            } = fixture;
+            const { voting, electionId, election, identities, group } =
+                await loadFixture(startPreparedElection);
 
             const encryptedBallot = hexlify(
                 toUtf8Bytes("duplicate-test-ballot")
@@ -602,33 +459,16 @@ describe("Voting", () => {
                 points: proof.points
             };
 
-            await voting.submitBallot(
-                electionId,
-                encryptedBallot,
-                proofStruct
-            );
+            await voting.submitBallot(electionId, encryptedBallot, proofStruct);
 
             await expect(
-                voting.submitBallot(
-                    electionId,
-                    encryptedBallot,
-                    proofStruct
-                )
+                voting.submitBallot(electionId, encryptedBallot, proofStruct)
             ).to.be.reverted;
         });
 
         it("rejects a proof with the wrong election scope", async () => {
-            const fixture = await loadFixture(
-                startPreparedElection
-            );
-
-            const {
-                voting,
-                electionId,
-                election,
-                identities,
-                group
-            } = fixture;
+            const { voting, electionId, election, identities, group } =
+                await loadFixture(startPreparedElection);
 
             const encryptedBallot = hexlify(
                 toUtf8Bytes("wrong-scope-ballot")
@@ -642,36 +482,20 @@ describe("Voting", () => {
             );
 
             await expect(
-                voting.submitBallot(
-                    electionId,
-                    encryptedBallot,
-                    {
-                        merkleTreeDepth: proof.merkleTreeDepth,
-                        merkleTreeRoot: proof.merkleTreeRoot,
-                        nullifier: proof.nullifier,
-                        message: proof.message,
-                        scope: proof.scope,
-                        points: proof.points
-                    }
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidProofScope"
-            );
+                voting.submitBallot(electionId, encryptedBallot, {
+                    merkleTreeDepth: proof.merkleTreeDepth,
+                    merkleTreeRoot: proof.merkleTreeRoot,
+                    nullifier: proof.nullifier,
+                    message: proof.message,
+                    scope: proof.scope,
+                    points: proof.points
+                })
+            ).to.be.revertedWithCustomError(voting, "InvalidProofScope");
         });
 
         it("rejects a modified ciphertext", async () => {
-            const fixture = await loadFixture(
-                startPreparedElection
-            );
-
-            const {
-                voting,
-                electionId,
-                election,
-                identities,
-                group
-            } = fixture;
+            const { voting, electionId, election, identities, group } =
+                await loadFixture(startPreparedElection);
 
             const originalBallot = hexlify(
                 toUtf8Bytes("original-ballot")
@@ -689,28 +513,20 @@ describe("Voting", () => {
             );
 
             await expect(
-                voting.submitBallot(
-                    electionId,
-                    modifiedBallot,
-                    {
-                        merkleTreeDepth: proof.merkleTreeDepth,
-                        merkleTreeRoot: proof.merkleTreeRoot,
-                        nullifier: proof.nullifier,
-                        message: proof.message,
-                        scope: proof.scope,
-                        points: proof.points
-                    }
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidBallotCommitment"
-            );
+                voting.submitBallot(electionId, modifiedBallot, {
+                    merkleTreeDepth: proof.merkleTreeDepth,
+                    merkleTreeRoot: proof.merkleTreeRoot,
+                    nullifier: proof.nullifier,
+                    message: proof.message,
+                    scope: proof.scope,
+                    points: proof.points
+                })
+            ).to.be.revertedWithCustomError(voting, "InvalidBallotCommitment");
         });
 
         it("rejects an empty encrypted ballot", async () => {
-            const { voting, electionId } = await loadFixture(
-                startPreparedElection
-            );
+            const { voting, electionId } =
+                await loadFixture(startPreparedElection);
 
             const dummyProof = {
                 merkleTreeDepth: 1,
@@ -719,8 +535,7 @@ describe("Voting", () => {
                 message: 0n,
                 scope: 0n,
                 points: [
-                    0n, 0n, 0n, 0n,
-                    0n, 0n, 0n, 0n
+                    0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n
                 ] as [
                     bigint,
                     bigint,
@@ -734,30 +549,19 @@ describe("Voting", () => {
             };
 
             await expect(
-                voting.submitBallot(
-                    electionId,
-                    "0x",
-                    dummyProof
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "EmptyEncryptedBallot"
-            );
+                voting.submitBallot(electionId, "0x", dummyProof)
+            ).to.be.revertedWithCustomError(voting, "EmptyEncryptedBallot");
         });
     });
 
     describe("Election closing and tally", () => {
         it("rejects closing an election before its deadline", async () => {
-            const { voting, electionId } = await loadFixture(
-                startPreparedElection
-            );
+            const { voting, electionId } =
+                await loadFixture(startPreparedElection);
 
             await expect(
                 voting.closeElection(electionId)
-            ).to.be.revertedWithCustomError(
-                voting,
-                "ElectionDeadlineNotReached"
-            );
+            ).to.be.revertedWithCustomError(voting, "ElectionDeadlineNotReached");
         });
 
         it("closes an election after its deadline", async () => {
@@ -776,23 +580,15 @@ describe("Voting", () => {
         });
 
         it("rejects results before finalization", async () => {
-            const { voting, electionId } = await loadFixture(
-                createPreparedElection
-            );
+            const { voting, electionId } =
+                await loadFixture(createPreparedElection);
 
             await expect(
                 voting.getResults(electionId)
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidElectionStatus"
-            );
+            ).to.be.revertedWithCustomError(voting, "InvalidElectionStatus");
         });
 
         it("finalizes a tally consistent with accepted ballots", async () => {
-            const fixture = await loadFixture(
-                startPreparedElection
-            );
-
             const {
                 voting,
                 electionId,
@@ -800,9 +596,8 @@ describe("Voting", () => {
                 election,
                 identities,
                 group
-            } = fixture;
+            } = await loadFixture(startPreparedElection);
 
-            // Submit five valid ballots using five distinct identities.
             for (let i = 0; i < 5; i += 1) {
                 await submitTestBallot(
                     voting,
@@ -814,36 +609,25 @@ describe("Voting", () => {
                 );
             }
 
-            const updatedElection = await voting.getElection(
-                electionId
-            );
-
+            const updatedElection = await voting.getElection(electionId);
             expect(updatedElection.acceptedBallotCount).to.equal(5n);
 
             await time.increaseTo(Number(endTime));
-
             await voting.closeElection(electionId);
 
-            // The tally total is 5, matching the five accepted ballots.
             await expect(
-                voting.finalizeElection(
-                    electionId,
-                    [3n, 2n]
-                )
-            ).to.emit(voting, "ElectionFinalized")
+                voting.finalizeElection(electionId, [3n, 2n])
+            )
+                .to.emit(voting, "ElectionFinalized")
                 .withArgs(electionId, 5n);
 
-            const [results, totalVotes] = await voting.getResults(
-                electionId
-            );
+            const [results, totalVotes] = await voting.getResults(electionId);
 
             expect(results[0]).to.equal(3n);
             expect(results[1]).to.equal(2n);
             expect(totalVotes).to.equal(5n);
 
-            const finalizedElection = await voting.getElection(
-                electionId
-            );
+            const finalizedElection = await voting.getElection(electionId);
 
             expect(finalizedElection.status).to.equal(3n);
         });
@@ -852,20 +636,12 @@ describe("Voting", () => {
             const { voting, electionId, endTime } =
                 await loadFixture(startPreparedElection);
 
-            // No ballots are submitted.
             await time.increaseTo(Number(endTime));
-
             await voting.closeElection(electionId);
 
             await expect(
-                voting.finalizeElection(
-                    electionId,
-                    [1n, 1n]
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidTallyTotal"
-            );
+                voting.finalizeElection(electionId, [1n, 1n])
+            ).to.be.revertedWithCustomError(voting, "InvalidTallyTotal");
         });
 
         it("rejects a tally with the wrong number of candidates", async () => {
@@ -873,48 +649,26 @@ describe("Voting", () => {
                 await loadFixture(startPreparedElection);
 
             await time.increaseTo(Number(endTime));
-
             await voting.closeElection(electionId);
 
             await expect(
-                voting.finalizeElection(
-                    electionId,
-                    [0n]
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "InvalidTallyLength"
-            );
+                voting.finalizeElection(electionId, [0n])
+            ).to.be.revertedWithCustomError(voting, "InvalidTallyLength");
         });
 
         it("rejects tally finalization by an unauthorized account", async () => {
-            const {
-                voting,
-                electionId,
-                endTime,
-                other
-            } = await loadFixture(startPreparedElection);
+            const { voting, electionId, endTime, other } =
+                await loadFixture(startPreparedElection);
 
             await time.increaseTo(Number(endTime));
-
             await voting.closeElection(electionId);
 
             await expect(
-                voting.connect(other).finalizeElection(
-                    electionId,
-                    [0n, 0n]
-                )
-            ).to.be.revertedWithCustomError(
-                voting,
-                "Unauthorized"
-            );
+                voting.connect(other).finalizeElection(electionId, [0n, 0n])
+            ).to.be.revertedWithCustomError(voting, "Unauthorized");
         });
 
         it("returns individual candidate vote counts after finalization", async () => {
-            const fixture = await loadFixture(
-                startPreparedElection
-            );
-
             const {
                 voting,
                 electionId,
@@ -922,9 +676,8 @@ describe("Voting", () => {
                 election,
                 identities,
                 group
-            } = fixture;
+            } = await loadFixture(startPreparedElection);
 
-            // Five accepted ballots are required for a 3-2 tally.
             for (let i = 0; i < 5; i += 1) {
                 await submitTestBallot(
                     voting,
@@ -936,33 +689,19 @@ describe("Voting", () => {
                 );
             }
 
-            const updatedElection = await voting.getElection(
-                electionId
-            );
-
+            const updatedElection = await voting.getElection(electionId);
             expect(updatedElection.acceptedBallotCount).to.equal(5n);
 
             await time.increaseTo(Number(endTime));
-
             await voting.closeElection(electionId);
-
-            await voting.finalizeElection(
-                electionId,
-                [3n, 2n]
-            );
+            await voting.finalizeElection(electionId, [3n, 2n]);
 
             expect(
-                await voting.getCandidateVoteCount(
-                    electionId,
-                    1n
-                )
+                await voting.getCandidateVoteCount(electionId, 1n)
             ).to.equal(3n);
 
             expect(
-                await voting.getCandidateVoteCount(
-                    electionId,
-                    2n
-                )
+                await voting.getCandidateVoteCount(electionId, 2n)
             ).to.equal(2n);
         });
     });

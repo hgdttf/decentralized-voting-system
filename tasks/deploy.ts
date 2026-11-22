@@ -1,8 +1,11 @@
 
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { task, types } from "hardhat/config";
 
-// Existing task: deploy the Feedback contract.
-// Preserved to maintain compatibility with Feedback.ts tests.
+// Existing Feedback deployment task.
+// Preserved for compatibility with existing tests.
+
 task("deploy", "Deploy a Feedback contract")
     .addOptionalParam(
         "semaphore",
@@ -45,11 +48,13 @@ task("deploy", "Deploy a Feedback contract")
         return feedbackContract;
     });
 
-// New task: deploy the Voting contract independently.
+// Voting deployment task.
+// Deploys Semaphore and Voting, then saves deployment addresses.
+
 task("deploy:voting", "Deploy the Voting contract")
     .addOptionalParam(
         "semaphore",
-        "Semaphore contract address",
+        "Existing Semaphore contract address",
         undefined,
         types.string
     )
@@ -59,7 +64,7 @@ task("deploy:voting", "Deploy the Voting contract")
         true,
         types.boolean
     )
-    .setAction(async ({ logs, semaphore }, { ethers, run }) => {
+    .setAction(async ({ logs, semaphore }, { ethers, run, network }) => {
         let semaphoreAddress = semaphore;
 
         if (!semaphoreAddress) {
@@ -79,12 +84,50 @@ task("deploy:voting", "Deploy the Voting contract")
 
         await votingContract.waitForDeployment();
 
+        const votingAddress = await votingContract.getAddress();
+
+        const networkInfo = await ethers.provider.getNetwork();
+
+        const deployment = {
+            schemaVersion: 1,
+            network: network.name,
+            chainId: networkInfo.chainId.toString(),
+            deployedAt: new Date().toISOString(),
+            contracts: {
+                semaphore: semaphoreAddress,
+                voting: votingAddress
+            }
+        };
+
+        const deploymentDirectory = join(
+            process.cwd(),
+            "deployments"
+        );
+
+        await mkdir(deploymentDirectory, {
+            recursive: true
+        });
+
+        const deploymentFile = join(
+            deploymentDirectory,
+            `${network.name}.json`
+        );
+
+        await writeFile(
+            deploymentFile,
+            `${JSON.stringify(deployment, null, 4)}\n`,
+            "utf8"
+        );
+
         if (logs) {
-            console.info("Voting contract deployed successfully.");
-            console.info(`Semaphore address: ${semaphoreAddress}`);
-            console.info(
-                `Voting address: ${await votingContract.getAddress()}`
-            );
+            console.info("\nVoting deployment successful.");
+            console.info("----------------------------------");
+            console.info(`Network: ${network.name}`);
+            console.info(`Chain ID: ${networkInfo.chainId}`);
+            console.info(`Semaphore: ${semaphoreAddress}`);
+            console.info(`Voting: ${votingAddress}`);
+            console.info(`Configuration: ${deploymentFile}`);
+            console.info("----------------------------------\n");
         }
 
         return votingContract;
