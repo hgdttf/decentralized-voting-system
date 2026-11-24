@@ -1,3 +1,4 @@
+
 import sodium from "libsodium-wrappers-sumo";
 import { Identity } from "@semaphore-protocol/core";
 
@@ -49,7 +50,8 @@ function validateBackup(backup: EncryptedIdentityBackup): void {
 
     if (
         !/^(?:[0-9a-f]{2})+$/i.test(backup.ciphertext) ||
-        backup.ciphertext.length < sodium.crypto_aead_xchacha20poly1305_ietf_ABYTES * 2
+        backup.ciphertext.length <
+            sodium.crypto_aead_xchacha20poly1305_ietf_ABYTES * 2
     ) {
         throw new Error("Invalid backup ciphertext.");
     }
@@ -93,18 +95,20 @@ export async function encryptIdentityBackup(
     );
 
     const key = await deriveKey(passphrase, salt);
+    let plaintext: Uint8Array | undefined;
 
     try {
-        const plaintext = sodium.from_string(identity.export());
+        plaintext = sodium.from_string(identity.export());
 
-        const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
-            plaintext,
-            sodium.from_string(VAULT_CONTEXT),
-            null,
-            nonce,
-            key,
-            "hex"
-        );
+        const ciphertext =
+            sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+                plaintext,
+                sodium.from_string(VAULT_CONTEXT),
+                null,
+                nonce,
+                key,
+                "hex"
+            );
 
         return {
             version: VAULT_VERSION,
@@ -114,6 +118,10 @@ export async function encryptIdentityBackup(
             ciphertext
         };
     } finally {
+        if (plaintext) {
+            sodium.memzero(plaintext);
+        }
+
         sodium.memzero(key);
     }
 }
@@ -135,27 +143,30 @@ export async function decryptIdentityBackup(
     const ciphertext = sodium.from_hex(backup.ciphertext);
 
     const key = await deriveKey(passphrase, salt);
+    let plaintext: Uint8Array | undefined;
 
     try {
-        const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-            null,
-            ciphertext,
-            sodium.from_string(VAULT_CONTEXT),
-            nonce,
-            key
-        );
+        plaintext =
+            sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+                null,
+                ciphertext,
+                sodium.from_string(VAULT_CONTEXT),
+                nonce,
+                key
+            );
 
         const exportedIdentity = sodium.to_string(plaintext);
-        const identity = Identity.import(exportedIdentity);
 
-        sodium.memzero(plaintext);
-
-        return identity;
+        return Identity.import(exportedIdentity);
     } catch {
         throw new Error(
             "Identity backup decryption failed. Check the passphrase or backup integrity."
         );
     } finally {
+        if (plaintext) {
+            sodium.memzero(plaintext);
+        }
+
         sodium.memzero(key);
     }
 }

@@ -74,3 +74,9 @@ node_modules/
 *.identity-backup.json
 *.identity.json
 *.election-key.json
+
+# Local cryptographic backups — never commit
+/backups/
+
+# Local Hardhat deployment addresses — regenerate on each developer machine
+/deployments/*.json
